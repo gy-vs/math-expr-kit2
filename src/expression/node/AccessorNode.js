@@ -10,8 +10,14 @@ import {
   isSymbolNode
 } from '../../utils/is.js'
 import { getSafeProperty } from '../../utils/customs.js'
+import { escape } from '../../utils/string.js'
 import { factory } from '../../utils/factory.js'
 import { accessFactory } from './utils/access.js'
+import {
+  SHORT_CIRCUIT,
+  compileChainMember,
+  isNullish
+} from './utils/optionalChain.js'
 
 const name = 'AccessorNode'
 const dependencies = [
@@ -38,6 +44,26 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
         isSymbolNode(node))
   }
 
+  /**
+   * Stringify the index part of an accessor, rendering the accessor
+   * operator as optional (`?.`) when needed.
+   * For dot notation this replaces the dot (`a?.prop`), for bracket
+   * notation it prepends the operator (`a?.[index]`).
+   * @param {IndexNode} index
+   * @param {Object} options
+   * @param {boolean} optional
+   * @return {string}
+   * @private
+   */
+  function formatAccessorIndex (index, options, optional) {
+    if (!optional) {
+      return index.toString(options)
+    }
+    return index.dotNotation
+      ? ('?.' + index.getObjectProperty())
+      : ('?.' + index.toString(options))
+  }
+
   class AccessorNode extends Node {
     /**
      * @constructor AccessorNode
@@ -47,8 +73,15 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @param {Node} object                 The object from which to retrieve
      *                                      a property or subset.
      * @param {IndexNode} index             IndexNode containing ranges
+     * @param {boolean} [optional=false]    Optional property describing whether
+     *                                      this accessor uses optional chaining
+     *                                      (`?.`) instead of a normal access
+     *                                      (`.` or `[]`). When the object is
+     *                                      `null` or `undefined`, an optional
+     *                                      accessor short-circuits the whole
+     *                                      chain and evaluates to `undefined`.
      */
-    constructor (object, index) {
+    constructor (object, index, optional) {
       super()
       if (!isNode(object)) {
         throw new TypeError('Node expected for parameter "object"')
@@ -59,6 +92,7 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
 
       this.object = object
       this.index = index
+      this.optional = optional === true
     }
 
     // readonly property name
@@ -90,18 +124,45 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      *                        evalNode(scope: Object, args: Object, context: *)
      */
     _compile (math, argNames) {
-      const evalObject = this.object._compile(math, argNames)
+      // _compile is only invoked from outside of a chain: from within a chain
+      // the node is compiled via _compileChain. Hence this is a chain
+      // boundary, where a short-circuited optional chain becomes `undefined`.
+      const evalChain = this._compileChain(math, argNames)
+      return function evalAccessorNode (scope, args, context) {
+        const result = evalChain(scope, args, context)
+        return (result === SHORT_CIRCUIT) ? undefined : result
+      }
+    }
+
+    /**
+     * Compile the accessor as a member of an optional chain.
+     * Unlike {@link _compile}, the returned function returns the
+     * {@link SHORT_CIRCUIT} sentinel instead of accessing a property
+     * when the preceding part of the chain already short-circuited, or
+     * when this is an optional accessor and the object is nullish.
+     * @param {Object} math
+     * @param {Object} argNames
+     * @return {function}
+     */
+    _compileChain (math, argNames) {
+      const evalObject = compileChainMember(this.object, math, argNames)
       const evalIndex = this.index._compile(math, argNames)
+      const optional = this.optional
 
       if (this.index.isObjectProperty()) {
         const prop = this.index.getObjectProperty()
         return function evalAccessorNode (scope, args, context) {
           // get a property from an object evaluated using the scope.
-          return getSafeProperty(evalObject(scope, args, context), prop)
+          const object = evalObject(scope, args, context)
+          if (object === SHORT_CIRCUIT) return SHORT_CIRCUIT
+          if (optional && isNullish(object)) return SHORT_CIRCUIT
+          return getSafeProperty(object, prop)
         }
       } else {
         return function evalAccessorNode (scope, args, context) {
           const object = evalObject(scope, args, context)
+          if (object === SHORT_CIRCUIT) return SHORT_CIRCUIT
+          if (optional && isNullish(object)) return SHORT_CIRCUIT
           // we pass just object here instead of context:
           const index = evalIndex(scope, args, object)
           return access(object, index)
@@ -127,7 +188,8 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
     map (callback) {
       return new AccessorNode(
         this._ifNode(callback(this.object, 'object', this)),
-        this._ifNode(callback(this.index, 'index', this))
+        this._ifNode(callback(this.index, 'index', this)),
+        this.optional
       )
     }
 
@@ -136,7 +198,7 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @return {AccessorNode}
      */
     clone () {
-      return new AccessorNode(this.object, this.index)
+      return new AccessorNode(this.object, this.index, this.optional)
     }
 
     /**
@@ -150,7 +212,7 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
         object = '(' + object + ')'
       }
 
-      return object + this.index.toString(options)
+      return object + formatAccessorIndex(this.index, options, this.optional)
     }
 
     /**
@@ -167,7 +229,20 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
           '<span class="math-parenthesis math-round-parenthesis">)</span>'
       }
 
-      return object + this.index.toHTML(options)
+      if (!this.optional) {
+        return object + this.index.toHTML(options)
+      }
+
+      if (this.index.dotNotation) {
+        return object +
+          '<span class="math-operator math-accessor-operator">?.</span>' +
+          '<span class="math-symbol math-property">' +
+          escape(this.index.getObjectProperty()) + '</span>'
+      }
+
+      return object +
+        '<span class="math-operator math-accessor-operator">?.</span>' +
+        this.index.toHTML(options)
     }
 
     /**
@@ -181,7 +256,15 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
         object = '\\left(\' + object + \'\\right)'
       }
 
-      return object + this.index.toTex(options)
+      if (!this.optional) {
+        return object + this.index.toTex(options)
+      }
+
+      if (this.index.dotNotation) {
+        return object + '?.' + this.index.getObjectProperty()
+      }
+
+      return object + '?.' + this.index.toTex(options)
     }
 
     /**
@@ -192,7 +275,8 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
       return {
         mathjs: name,
         object: this.object,
-        index: this.index
+        index: this.index,
+        optional: this.optional
       }
     }
 
@@ -200,12 +284,14 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      * Instantiate an AccessorNode from its JSON representation
      * @param {Object} json
      *     An object structured like
-     *     `{"mathjs": "AccessorNode", object: ..., index: ...}`,
-     *     where mathjs is optional
+     *     `{"mathjs": "AccessorNode", object: ..., index: ..., optional: false}`,
+     *     where mathjs is optional. The `optional` property is optional itself
+     *     (it defaults to `false`) for backwards compatibility with older
+     *     serialized nodes.
      * @returns {AccessorNode}
      */
     static fromJSON (json) {
-      return new AccessorNode(json.object, json.index)
+      return new AccessorNode(json.object, json.index, json.optional === true)
     }
   }
 

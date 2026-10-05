@@ -1,10 +1,15 @@
 import { isAccessorNode, isFunctionAssignmentNode, isIndexNode, isNode, isSymbolNode } from '../../utils/is.js'
 import { escape, format } from '../../utils/string.js'
 import { hasOwnProperty } from '../../utils/object.js'
-import { getSafeProperty, getSafeMethod } from '../../utils/customs.js'
+import { getSafeProperty, getSafeMethod, isSafeMethod } from '../../utils/customs.js'
 import { createSubScope } from '../../utils/scope.js'
 import { factory } from '../../utils/factory.js'
 import { defaultTemplate, latexFunctions } from '../../utils/latex.js'
+import {
+  SHORT_CIRCUIT,
+  compileChainMember,
+  isNullish
+} from './utils/optionalChain.js'
 
 const name = 'FunctionNode'
 const dependencies = [
@@ -94,8 +99,13 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
      *     Item resolving to a function on which to invoke
      *     the arguments, typically a SymbolNode or AccessorNode
      * @param {./Node[]} args
+     * @param {boolean} [optional=false]
+     *     Optional property describing whether this invocation uses optional
+     *     chaining (`?.()`). When the function is `null` or `undefined`,
+     *     the whole chain short-circuits and evaluates to `undefined`
+     *     without evaluating the arguments.
      */
-    constructor (fn, args) {
+    constructor (fn, args, optional) {
       super()
       if (typeof fn === 'string') {
         fn = new SymbolNode(fn)
@@ -110,6 +120,7 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
 
       this.fn = fn
       this.args = args || []
+      this.optional = optional === true
     }
 
     // readonly property name
