@@ -243,6 +243,15 @@ export const properties = [
     'OperatorNode:factorial': {
       op: '!',
       associativity: 'left'
+    },
+    // nullish coalescing shares the precedence level of the factorial
+    // operator: it binds less tight than the postfix operators `!` and `'`
+    // and tighter than all other operators, so parentheses are only needed
+    // around a nullish coalescing when it is the operand of `!` or `'`
+    'OperatorNode:nullish': {
+      op: '??',
+      associativity: 'left',
+      associativeWith: ['OperatorNode:factorial']
     }
   },
   { // matrix transpose

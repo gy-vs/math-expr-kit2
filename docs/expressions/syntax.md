@@ -60,6 +60,7 @@ Operator    | Name                       | Syntax      | Associativity | Example
 `{`, `}`    | Object                     | `{...}`     | None          | `{a: 1, b: 2}`        | `{a: 1, b: 2}`
 `,`         | Parameter separator        | `x, y`      | Left to right | `max(2, 1, 5)`        | `5`
 `.`         | Property accessor          | `obj.prop`  | Left to right | `obj={a: 12}; obj.a`  | `12`
+`?.`        | Optional chaining          | `obj?.prop`, `obj?.[...]`, `obj?.(...)` | Left to right | `obj={a: 12}; obj?.a` | `12`
 `;`         | Statement separator        | `x; y`      | Left to right | `a=2; b=3; a*b`       | `[6]`
 `;`         | Row separator              | `[x; y]`    | Left to right | `[1,2;3,4]`           | `[[1,2],[3,4]]`
 `\n`        | Statement separator        | `x \n y`    | Left to right | `a=2 \n b=3 \n a*b`   | `[2,3,6]`
@@ -91,6 +92,7 @@ Operator    | Name                       | Syntax      | Associativity | Example
 `or`        | Logical or                 | `x or y`    | Left to right | `true or false`       | `true`
 `xor`       | Logical xor                | `x xor y`   | Left to right | `true xor true`       | `false`
 `=`         | Assignment                 | `x = y`     | Right to left | `a = 5`               | `5`
+`??`        | Nullish coalescing         | `x ?? y`    | Left to right | `null ?? 42`          | `42`
 `?` `:`     | Conditional expression     | `x ? y : z` | Right to left | `15 > 100 ? 1 : -1`   | `-1`
 `:`         | Range                      | `x : y`     | Right to left | `1:4`                 | `[1,2,3,4]`
 `to`, `in`  | Unit conversion            | `x to y`    | Left to right | `2 inch to cm`        | `5.08 cm`
@@ -112,6 +114,7 @@ Operators                         | Description
 `x(...)`<br>`x[...]`<br>`obj.prop`<br>`:`| Function call<br>Matrix index<br>Property accessor<br>Key/value separator
 `'`                               | Matrix transpose
 `!`                               | Factorial
+`??`                              | Nullish coalescing (lazily evaluated)
 `^`, `.^`                         | Exponentiation
 `+`, `-`, `~`, `not`              | Unary plus, unary minus, bitwise not, logical not
 See section below                 | Implicit multiplication

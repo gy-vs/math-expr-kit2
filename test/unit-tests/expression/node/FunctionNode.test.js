@@ -690,6 +690,105 @@ describe('FunctionNode', function () {
     }
   })
 
+  it('should create a FunctionNode with an optional call', function () {
+    const c = new ConstantNode(4)
+
+    const n1 = new FunctionNode(new SymbolNode('sqrt'), [c])
+    assert.strictEqual(n1.optional, false)
+
+    const n2 = new FunctionNode(new SymbolNode('sqrt'), [c], true)
+    assert.strictEqual(n2.optional, true)
+    assert(n2 instanceof FunctionNode)
+    assert(n2 instanceof Node)
+  })
+
+  it('should throw an error when the optional flag is not a boolean', function () {
+    const c = new ConstantNode(4)
+    assert.throws(function () { console.log(new FunctionNode(new SymbolNode('sqrt'), [c], 'yes')) }, TypeError)
+  })
+
+  it('should compile a FunctionNode with an optional call', function () {
+    const n = new FunctionNode(new SymbolNode('f'), [new ConstantNode(2)], true)
+    const expr = n.compile()
+
+    assert.strictEqual(expr.evaluate({ f: null }), undefined)
+    assert.strictEqual(expr.evaluate({ f: undefined }), undefined)
+    assert.strictEqual(expr.evaluate({ f: function (x) { return x * 3 } }), 6)
+    assert.strictEqual(expr.evaluate({}), undefined) // undefined function
+    assert.throws(function () { expr.evaluate({ f: 7 }) }, TypeError) // not callable
+  })
+
+  it('should compile a FunctionNode calling an optionally chained method', function () {
+    // formatter?.fmt(x)
+    const fn = new AccessorNode(new SymbolNode('formatter'), new IndexNode([new ConstantNode('fmt')], true), true)
+    const n = new FunctionNode(fn, [new SymbolNode('x')])
+    const expr = n.compile()
+
+    assert.strictEqual(expr.evaluate({ formatter: null, x: 1 }), undefined)
+    assert.strictEqual(expr.evaluate({
+      formatter: { fmt: function (x) { return x * 2 } },
+      x: 21
+    }), 42)
+  })
+
+  it('should short-circuit a chain of accessors and calls', function () {
+    // a?.b.c(1)
+    const ab = new AccessorNode(new SymbolNode('a'), new IndexNode([new ConstantNode('b')], true), true)
+    const abc = new AccessorNode(ab, new IndexNode([new ConstantNode('c')], true))
+    const n = new FunctionNode(abc, [new ConstantNode(1)])
+    const expr = n.compile()
+
+    assert.strictEqual(expr.evaluate({ a: null }), undefined)
+    assert.strictEqual(expr.evaluate({ a: { b: { c: function (x) { return x + 1 } } } }), 2)
+  })
+
+  it('should stringify a FunctionNode with an optional call', function () {
+    const n = new FunctionNode(new SymbolNode('f'), [new ConstantNode(2)], true)
+    assert.strictEqual(n.toString(), 'f?.(2)')
+
+    const m = new FunctionNode(new SymbolNode('f'), [new ConstantNode(2)])
+    assert.strictEqual(m.toString(), 'f(2)')
+  })
+
+  it('should keep the optional flag when mapping or cloning a FunctionNode', function () {
+    const n = new FunctionNode(new SymbolNode('f'), [new ConstantNode(2)], true)
+
+    const mapped = n.map(node => node)
+    assert.strictEqual(mapped.optional, true)
+    assert.strictEqual(mapped.toString(), 'f?.(2)')
+
+    const cloned = n.clone()
+    assert.strictEqual(cloned.optional, true)
+    assert.strictEqual(cloned.toString(), 'f?.(2)')
+  })
+
+  it('toJSON and fromJSON with an optional call', function () {
+    const n = new FunctionNode(new SymbolNode('f'), [new ConstantNode(2)], true)
+
+    const json = n.toJSON()
+
+    assert.deepStrictEqual(json, {
+      mathjs: 'FunctionNode',
+      fn: n.fn,
+      args: n.args,
+      optional: true
+    })
+
+    const parsed = FunctionNode.fromJSON(json)
+    assert.deepStrictEqual(parsed, n)
+    assert.strictEqual(parsed.optional, true)
+    assert.strictEqual(parsed.toString(), 'f?.(2)')
+  })
+
+  it('should survive a JSON round-trip of an optional call via the reviver and evaluate the same', function () {
+    const node = math.parse('formatter?.fmt(x)')
+    const revived = JSON.parse(JSON.stringify(node), math.reviver)
+
+    assert.strictEqual(revived.toString(), node.toString())
+    assert.strictEqual(revived.evaluate({ formatter: null, x: 1 }), undefined)
+    assert.strictEqual(revived.evaluate({ formatter: { fmt: function (x) { return x * 2 } }, x: 21 }), 42)
+  })
+
   // FIXME: custom instances should have there own function, not return the same function?
   after(function () {
     const customMath = math.create()

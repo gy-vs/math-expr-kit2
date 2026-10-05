@@ -5,6 +5,11 @@ import { getSafeProperty, getSafeMethod } from '../../utils/customs.js'
 import { createSubScope } from '../../utils/scope.js'
 import { factory } from '../../utils/factory.js'
 import { defaultTemplate, latexFunctions } from '../../utils/latex.js'
+import {
+  OPTIONAL_SHORT_CIRCUIT,
+  catchOptionalShortCircuit,
+  hasOptionalChaining
+} from './utils/optionalChain.js'
 
 const name = 'FunctionNode'
 const dependencies = [
@@ -94,8 +99,15 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
      *     Item resolving to a function on which to invoke
      *     the arguments, typically a SymbolNode or AccessorNode
      * @param {./Node[]} args
+     * @param {boolean} [optional=false]
+     *     Optional property, true when the invocation was written using
+     *     optional chaining like `fn?.(2)`. The invocation then evaluates to
+     *     `undefined` when the function is nullish (null or undefined)
+     *     instead of throwing an error, and the remainder of the chain of
+     *     accessors and calls built on top of it is short-circuited to
+     *     `undefined`.
      */
-    constructor (fn, args) {
+    constructor (fn, args, optional) {
       super()
       if (typeof fn === 'string') {
         fn = new SymbolNode(fn)
@@ -107,9 +119,13 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
         throw new TypeError(
           'Array containing Nodes expected for parameter "args"')
       }
+      if (optional !== undefined && typeof optional !== 'boolean') {
+        throw new TypeError('Parameter "optional" must be a boolean')
+      }
 
       this.fn = fn
       this.args = args || []
+      this.optional = !!optional
     }
 
     // readonly property name
@@ -131,13 +147,22 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
      *                          for arguments from user assigned functions
      *                          (see FunctionAssignmentNode) or special symbols
      *                          like `end` (see IndexNode).
+     * @param {boolean} [inChain=false] True when the node is compiled as a
+     *                          non-outermost link of a chain of accessors and
+     *                          calls. Only used by AccessorNode and FunctionNode
+     *                          to implement the short-circuiting of optional
+     *                          chaining, see utils/optionalChain.
      * @return {function} Returns a function which can be called like:
      *                        evalNode(scope: Object, args: Object, context: *)
      */
-    _compile (math, argNames) {
+    _compile (math, argNames, inChain = false) {
       // compile arguments
       const evalArgs = this.args.map((arg) => arg._compile(math, argNames))
 
+      // whether this is an optional call like `fn?.(2)`
+      const optional = this.optional
+
+      let evaluate
       if (isSymbolNode(this.fn)) {
         const name = this.fn.name
         if (!argNames[name]) {
@@ -152,10 +177,14 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
               value = scope.get(name)
             } else if (name in math) {
               value = getSafeProperty(math, name)
+            } else if (optional) {
+              // an optional call `fn?.(...)` on an undefined function
+              // evaluates to undefined
+              return undefined
             } else {
               return FunctionNode.onUndefinedFunction(name)
             }
-            if (typeof value === 'function') {
+            if (typeof value === 'function' || (optional && value == null)) {
               return value
             }
             throw new TypeError(
@@ -167,8 +196,11 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
             // pass unevaluated parameters (nodes) to the function
             // "raw" evaluation
             const rawArgs = this.args
-            return function evalFunctionNode (scope, args, context) {
+            evaluate = function evalFunctionNode (scope, args, context) {
               const fn = resolveFn(scope)
+              if (optional && fn == null) {
+                throw OPTIONAL_SHORT_CIRCUIT
+              }
 
               // the original function can be overwritten in the scope with a non-rawArgs function
               if (fn.rawArgs === true) {
@@ -182,19 +214,30 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
           } else {
             // "regular" evaluation
             switch (evalArgs.length) {
-              case 0: return function evalFunctionNode (scope, args, context) {
+              case 0: evaluate = function evalFunctionNode (scope, args, context) {
                 const fn = resolveFn(scope)
+                if (optional && fn == null) {
+                  throw OPTIONAL_SHORT_CIRCUIT
+                }
                 return fn()
               }
-              case 1: return function evalFunctionNode (scope, args, context) {
+                break
+              case 1: evaluate = function evalFunctionNode (scope, args, context) {
                 const fn = resolveFn(scope)
+                if (optional && fn == null) {
+                  throw OPTIONAL_SHORT_CIRCUIT
+                }
                 const evalArg0 = evalArgs[0]
                 return fn(
                   evalArg0(scope, args, context)
                 )
               }
-              case 2: return function evalFunctionNode (scope, args, context) {
+                break
+              case 2: evaluate = function evalFunctionNode (scope, args, context) {
                 const fn = resolveFn(scope)
+                if (optional && fn == null) {
+                  throw OPTIONAL_SHORT_CIRCUIT
+                }
                 const evalArg0 = evalArgs[0]
                 const evalArg1 = evalArgs[1]
                 return fn(
@@ -202,8 +245,12 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
                   evalArg1(scope, args, context)
                 )
               }
-              default: return function evalFunctionNode (scope, args, context) {
+                break
+              default: evaluate = function evalFunctionNode (scope, args, context) {
                 const fn = resolveFn(scope)
+                if (optional && fn == null) {
+                  throw OPTIONAL_SHORT_CIRCUIT
+                }
                 const values = evalArgs.map((evalArg) => evalArg(scope, args, context))
                 return fn(...values)
               }
@@ -211,8 +258,11 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
           }
         } else { // the function symbol is an argName
           const rawArgs = this.args
-          return function evalFunctionNode (scope, args, context) {
+          evaluate = function evalFunctionNode (scope, args, context) {
             const fn = getSafeProperty(args, name)
+            if (optional && fn == null) {
+              throw OPTIONAL_SHORT_CIRCUIT
+            }
             if (typeof fn !== 'function') {
               throw new TypeError(
                 `Argument '${name}' was not a function; received: ${strin(fn)}`
@@ -236,12 +286,24 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
         // execute the function with the right context:
         // the object of the AccessorNode
 
-        const evalObject = this.fn.object._compile(math, argNames)
+        const evalObject = this.fn.object._compile(math, argNames, true)
         const prop = this.fn.index.getObjectProperty()
         const rawArgs = this.args
 
-        return function evalFunctionNode (scope, args, context) {
+        // whether the method itself is accessed via optional chaining,
+        // like `obj?.method(2)`
+        const fnOptionalChaining = this.fn.optionalChaining
+
+        evaluate = function evalFunctionNode (scope, args, context) {
           const object = evalObject(scope, args, context)
+          if (fnOptionalChaining && object == null) {
+            // optional chaining like `obj?.method(2)`: short-circuit the chain
+            throw OPTIONAL_SHORT_CIRCUIT
+          }
+          if (optional && object != null && object[prop] == null) {
+            // optional call like `obj.method?.(2)`: short-circuit the chain
+            throw OPTIONAL_SHORT_CIRCUIT
+          }
           const fn = getSafeMethod(object, prop)
 
           if (fn?.rawArgs) {
@@ -258,11 +320,15 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
         // we have to dynamically determine whether the function has the
         // rawArgs property
         const fnExpr = this.fn.toString()
-        const evalFn = this.fn._compile(math, argNames)
+        const evalFn = this.fn._compile(math, argNames, true)
         const rawArgs = this.args
 
-        return function evalFunctionNode (scope, args, context) {
+        evaluate = function evalFunctionNode (scope, args, context) {
           const fn = evalFn(scope, args, context)
+          if (optional && fn == null) {
+            // optional call like `fn?.(2)`: short-circuit the chain
+            throw OPTIONAL_SHORT_CIRCUIT
+          }
           if (typeof fn !== 'function') {
             throw new TypeError(
               `Expression '${fnExpr}' did not evaluate to a function; value is:` +
@@ -280,6 +346,12 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
           }
         }
       }
+
+      // when this node is the outermost link of a chain containing optional
+      // chaining, convert a short-circuit of the chain into `undefined`
+      return !inChain && hasOptionalChaining(this)
+        ? catchOptionalShortCircuit(evaluate)
+        : evaluate
     }
 
     /**
@@ -306,7 +378,7 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
       for (let i = 0; i < this.args.length; i++) {
         args[i] = this._ifNode(callback(this.args[i], 'args[' + i + ']', this))
       }
-      return new FunctionNode(fn, args)
+      return new FunctionNode(fn, args, this.optional)
     }
 
     /**
@@ -314,7 +386,7 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @return {FunctionNode}
      */
     clone () {
-      return new FunctionNode(this.fn, this.args.slice(0))
+      return new FunctionNode(this.fn, this.args.slice(0), this.optional)
     }
 
     /**
@@ -369,8 +441,8 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
         ? ('(' + this.fn.toString(options) + ')')
         : this.fn.toString(options)
 
-      // format the arguments like "add(2, 4.2)"
-      return fn + '(' + args.join(', ') + ')'
+      // format the arguments like "add(2, 4.2)" or "add?.(2, 4.2)"
+      return fn + (this.optional ? '?.' : '') + '(' + args.join(', ') + ')'
     }
 
     /**
@@ -378,22 +450,28 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @returns {Object}
      */
     toJSON () {
-      return {
+      const json = {
         mathjs: name,
         fn: this.fn,
         args: this.args
       }
+      // only serialized when true, to keep the JSON of existing
+      // expressions unchanged
+      if (this.optional) {
+        json.optional = true
+      }
+      return json
     }
 
     /**
      * Instantiate an AssignmentNode from its JSON representation
      * @param {Object} json  An object structured like
-     *                       `{"mathjs": "FunctionNode", fn: ..., args: ...}`,
+     *                       `{"mathjs": "FunctionNode", fn: ..., args: ..., optional: ...}`,
      *                       where mathjs is optional
      * @returns {FunctionNode}
      */
     static fromJSON = function (json) {
-      return new FunctionNode(json.fn, json.args)
+      return new FunctionNode(json.fn, json.args, json.optional)
     }
 
     /**
@@ -406,9 +484,10 @@ export const createFunctionNode = /* #__PURE__ */ factory(name, dependencies, ({
         return arg.toHTML(options)
       })
 
-      // format the arguments like "add(2, 4.2)"
+      // format the arguments like "add(2, 4.2)" or "add?.(2, 4.2)"
       return '<span class="math-function">' + escape(this.fn) +
-        '</span><span class="math-paranthesis math-round-parenthesis">(</span>' +
+        '</span>' + (this.optional ? '<span class="math-operator">?</span>' : '') +
+        '<span class="math-paranthesis math-round-parenthesis">(</span>' +
         args.join('<span class="math-separator">,</span>') +
         '<span class="math-paranthesis math-round-parenthesis">)</span>'
     }

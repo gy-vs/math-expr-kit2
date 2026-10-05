@@ -3,6 +3,7 @@ import { isAccessorNode, isConstantNode, isFunctionNode, isOperatorNode, isSymbo
 import { deepMap } from '../utils/collection.js'
 import { safeNumberType } from '../utils/number.js'
 import { hasOwnProperty } from '../utils/object.js'
+import { hasOptionalChaining } from './node/utils/optionalChain.js'
 
 const name = 'parse'
 const dependencies = [
@@ -160,7 +161,10 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
 
     '<<': true,
     '>>': true,
-    '>>>': true
+    '>>>': true,
+
+    '?.': true,
+    '??': true
   }
 
   // map with all named delimiters
@@ -319,7 +323,10 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
     }
 
     // check for delimiters consisting of 2 characters
-    if (c2.length === 2 && DELIMITERS[c2]) {
+    // Special case: `?.` must not be treated as optional chaining when it is
+    // directly followed by a digit, like in the conditional `a?.3:.7`
+    if (c2.length === 2 && DELIMITERS[c2] &&
+        (c2 !== '?.' || !parse.isDigit(state.expression.charAt(state.index + 2)))) {
       state.tokenType = TOKENTYPE.DELIMITER
       state.token = c2
       next(state)
@@ -687,6 +694,10 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
         return new AssignmentNode(new SymbolNode(name), value)
       } else if (isAccessorNode(node)) {
         // parse a matrix subset assignment like 'A[1,2] = 4'
+        if (hasOptionalChaining(node)) {
+          // an optional chain like 'a?.b' cannot be assigned to
+          throw createSyntaxError(state, 'Cannot assign to optional chain')
+        }
         getTokenSkipNewline(state)
         value = parseAssignment(state)
         return new AssignmentNode(node.object, node.index, value)
@@ -1200,7 +1211,7 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
   function parsePow (state) {
     let node, name, fn, params
 
-    node = parseLeftHandOperators(state)
+    node = parseNullishCoalescing(state)
 
     if (state.token === '^' || state.token === '.^') {
       name = state.token
@@ -1209,6 +1220,22 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
       getTokenSkipNewline(state)
       params = [node, parseUnary(state)] // Go back to unary, we can have '2^-3'
       node = new OperatorNode(name, fn, params)
+    }
+
+    return node
+  }
+
+  /**
+   * nullish coalescing operator 'x ?? y'
+   * @return {Node} node
+   * @private
+   */
+  function parseNullishCoalescing (state) {
+    let node = parseLeftHandOperators(state)
+
+    while (state.token === '??') { // eslint-disable-line no-unmodified-loop-condition
+      getTokenSkipNewline(state)
+      node = new OperatorNode('??', 'nullish', [node, parseLeftHandOperators(state)])
     }
 
     return node
@@ -1344,8 +1371,10 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
   /**
    * parse accessors:
    * - function invocation in round brackets (...), for example sqrt(2)
+   *   or sqrt?.(2) with optional chaining
    * - index enclosed in square brackets [...], for example A[2,3]
-   * - dot notation for properties, like foo.bar
+   *   or A?.[2,3] with optional chaining
+   * - dot notation for properties, like foo.bar or foo?.bar with optional chaining
    * @param {Object} state
    * @param {Node} node    Node on which to apply the parameters. If there
    *                       are no parameters in the expression, the node
@@ -1358,13 +1387,28 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
   function parseAccessors (state, node, types) {
     let params
 
-    while ((state.token === '(' || state.token === '[' || state.token === '.') &&
-        (!types || types.includes(state.token))) { // eslint-disable-line no-unmodified-loop-condition
+    // parse a chain of accessors, where every link can be preceded by
+    // the optional chaining operator `?.`
+    while (true) { // eslint-disable-line no-unmodified-loop-condition
+      // whether the optional chaining operator `?.` precedes the next link
+      let optional = false
+      if (state.token === '?.') {
+        optional = true
+        // consume the '?.' token
+        getToken(state)
+      }
+
+      const hasNextAccessor = (state.token === '(' || state.token === '[' || state.token === '.') &&
+          (!types || types.includes(state.token))
+      if (!(optional || hasNextAccessor)) {
+        break
+      }
+
       params = []
 
       if (state.token === '(') {
-        if (isSymbolNode(node) || isAccessorNode(node)) {
-          // function invocation like fn(2, 3) or obj.fn(2, 3)
+        if (optional || isSymbolNode(node) || isAccessorNode(node)) {
+          // function invocation like fn(2, 3), obj.fn(2, 3), or fn?.(2, 3)
           openParams(state)
           getToken(state)
 
@@ -1384,7 +1428,7 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
           closeParams(state)
           getToken(state)
 
-          node = new FunctionNode(node, params)
+          node = new FunctionNode(node, params, optional)
         } else {
           // implicit multiplication like (2+3)(4+5) or sqrt(2)(1+2)
           // don't parse it here but let it be handled by parseImplicitMultiplication
@@ -1412,22 +1456,27 @@ export const createParse = /* #__PURE__ */ factory(name, dependencies, ({
         closeParams(state)
         getToken(state)
 
-        node = new AccessorNode(node, new IndexNode(params))
+        node = new AccessorNode(node, new IndexNode(params), optional)
       } else {
         // dot notation like variable.prop
-        getToken(state)
+        // consume the '.' (in case of '?.', the token is already consumed)
+        if (!optional) {
+          getToken(state)
+        }
 
         const isPropertyName = state.tokenType === TOKENTYPE.SYMBOL ||
           (state.tokenType === TOKENTYPE.DELIMITER && state.token in NAMED_DELIMITERS)
         if (!isPropertyName) {
-          throw createSyntaxError(state, 'Property name expected after dot')
+          throw createSyntaxError(state, optional
+            ? 'Property name expected after optional chain'
+            : 'Property name expected after dot')
         }
 
         params.push(new ConstantNode(state.token))
         getToken(state)
 
         const dotNotation = true
-        node = new AccessorNode(node, new IndexNode(params, dotNotation))
+        node = new AccessorNode(node, new IndexNode(params, dotNotation), optional)
       }
     }
 

@@ -173,12 +173,14 @@ export interface AccessorNode<TObject extends MathNode = MathNode>
   isAccessorNode: true
   object: TObject
   index: IndexNode
+  optionalChaining: boolean
   name: string
 }
 export interface AccessorNodeCtor {
   new <TObject extends MathNode = MathNode>(
     object: TObject,
-    index: IndexNode
+    index: IndexNode,
+    optionalChaining?: boolean
   ): AccessorNode<TObject>
 }
 
@@ -306,11 +308,13 @@ export interface FunctionNode<
   isFunctionNode: true
   fn: TFn
   args: [...TArgs]
+  optional: boolean
 }
 export interface FunctionNodeCtor {
   new <TFn = SymbolNode, TArgs extends MathNode[] = MathNode[]>(
     fn: TFn,
-    args: [...TArgs]
+    args: [...TArgs],
+    optional?: boolean
   ): FunctionNode<TFn, TArgs>
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   onUndefinedFunction: (name: string) => any
@@ -1762,6 +1766,16 @@ export interface MathJsInstance extends MathJsFactory {
   not(
     x: number | BigNumber | bigint | Complex | Unit | MathCollection
   ): boolean | MathCollection
+
+  /**
+   * Nullish coalescing operator `??`. Returns the right-hand side operand
+   * when the left-hand side operand is null or undefined, and otherwise
+   * returns the left-hand side operand.
+   * @param x First value to check
+   * @param y Fallback value
+   * @returns Returns y when x is null or undefined, otherwise returns x
+   */
+  nullish(x: unknown, y: unknown): unknown
 
   /**
    * Logical or. Test if at least one value is defined with a
@@ -5658,6 +5672,14 @@ export interface MathJsChain<TValue> {
       number | BigNumber | bigint | Complex | Unit | MathCollection
     >
   ): MathJsChain<boolean | MathCollection>
+
+  /**
+   * Nullish coalescing operator `??`. Returns the right-hand side operand
+   * when the left-hand side operand is null or undefined, and otherwise
+   * returns the left-hand side operand.
+   * @param y Fallback value
+   */
+  nullish(this: MathJsChain<unknown>, y: unknown): MathJsChain<unknown>
 
   /**
    * Logical or. Test if at least one value is defined with a

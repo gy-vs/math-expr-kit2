@@ -12,6 +12,11 @@ import {
 import { getSafeProperty } from '../../utils/customs.js'
 import { factory } from '../../utils/factory.js'
 import { accessFactory } from './utils/access.js'
+import {
+  OPTIONAL_SHORT_CIRCUIT,
+  catchOptionalShortCircuit,
+  hasOptionalChaining
+} from './utils/optionalChain.js'
 
 const name = 'AccessorNode'
 const dependencies = [
@@ -47,8 +52,14 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @param {Node} object                 The object from which to retrieve
      *                                      a property or subset.
      * @param {IndexNode} index             IndexNode containing ranges
+     * @param {boolean} [optionalChaining=false]
+     *     Optional property, true when the accessor was written using optional
+     *     chaining like `a?.b` or `a?.["b"]`. The accessor then evaluates to
+     *     `undefined` when the object is nullish (null or undefined) instead
+     *     of throwing an error, and the remainder of the chain of accessors
+     *     and calls built on top of it is short-circuited to `undefined`.
      */
-    constructor (object, index) {
+    constructor (object, index, optionalChaining = false) {
       super()
       if (!isNode(object)) {
         throw new TypeError('Node expected for parameter "object"')
@@ -59,6 +70,7 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
 
       this.object = object
       this.index = index
+      this.optionalChaining = optionalChaining
     }
 
     // readonly property name
@@ -86,27 +98,51 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      *                          for arguments from user assigned functions
      *                          (see FunctionAssignmentNode) or special symbols
      *                          like `end` (see IndexNode).
+     * @param {boolean} [inChain=false] True when the node is compiled as a
+     *                          non-outermost link of a chain of accessors and
+     *                          calls. Only used by AccessorNode and FunctionNode
+     *                          to implement the short-circuiting of optional
+     *                          chaining, see utils/optionalChain.
      * @return {function} Returns a function which can be called like:
      *                        evalNode(scope: Object, args: Object, context: *)
      */
-    _compile (math, argNames) {
-      const evalObject = this.object._compile(math, argNames)
+    _compile (math, argNames, inChain = false) {
+      const evalObject = this.object._compile(math, argNames, true)
       const evalIndex = this.index._compile(math, argNames)
+      const optionalChaining = this.optionalChaining
 
+      let evaluate
       if (this.index.isObjectProperty()) {
         const prop = this.index.getObjectProperty()
-        return function evalAccessorNode (scope, args, context) {
+        evaluate = function evalAccessorNode (scope, args, context) {
+          const object = evalObject(scope, args, context)
+          if (optionalChaining && object == null) {
+            // optional chaining like `a?.b`: short-circuit the chain
+            throw OPTIONAL_SHORT_CIRCUIT
+          }
+
           // get a property from an object evaluated using the scope.
-          return getSafeProperty(evalObject(scope, args, context), prop)
+          return getSafeProperty(object, prop)
         }
       } else {
-        return function evalAccessorNode (scope, args, context) {
+        evaluate = function evalAccessorNode (scope, args, context) {
           const object = evalObject(scope, args, context)
+          if (optionalChaining && object == null) {
+            // optional chaining like `a?.[2]`: short-circuit the chain
+            throw OPTIONAL_SHORT_CIRCUIT
+          }
+
           // we pass just object here instead of context:
           const index = evalIndex(scope, args, object)
           return access(object, index)
         }
       }
+
+      // when this node is the outermost link of a chain containing optional
+      // chaining, convert a short-circuit of the chain into `undefined`
+      return !inChain && hasOptionalChaining(this)
+        ? catchOptionalShortCircuit(evaluate)
+        : evaluate
     }
 
     /**
@@ -127,7 +163,8 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
     map (callback) {
       return new AccessorNode(
         this._ifNode(callback(this.object, 'object', this)),
-        this._ifNode(callback(this.index, 'index', this))
+        this._ifNode(callback(this.index, 'index', this)),
+        this.optionalChaining
       )
     }
 
@@ -136,7 +173,7 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @return {AccessorNode}
      */
     clone () {
-      return new AccessorNode(this.object, this.index)
+      return new AccessorNode(this.object, this.index, this.optionalChaining)
     }
 
     /**
@@ -150,7 +187,12 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
         object = '(' + object + ')'
       }
 
-      return object + this.index.toString(options)
+      // dot notation like `a?.b` is rendered by the IndexNode as `.b`,
+      // so only the `?` has to be prepended here
+      const optionalChaining = this.optionalChaining
+        ? (this.index.dotNotation ? '?' : '?.')
+        : ''
+      return object + optionalChaining + this.index.toString(options)
     }
 
     /**
@@ -167,7 +209,10 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
           '<span class="math-parenthesis math-round-parenthesis">)</span>'
       }
 
-      return object + this.index.toHTML(options)
+      const optionalChaining = this.optionalChaining
+        ? '<span class="math-operator math-accessor-operator">?</span>'
+        : ''
+      return object + optionalChaining + this.index.toHTML(options)
     }
 
     /**
@@ -181,7 +226,8 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
         object = '\\left(\' + object + \'\\right)'
       }
 
-      return object + this.index.toTex(options)
+      const optionalChaining = this.optionalChaining ? '?' : ''
+      return object + optionalChaining + this.index.toTex(options)
     }
 
     /**
@@ -189,23 +235,29 @@ export const createAccessorNode = /* #__PURE__ */ factory(name, dependencies, ({
      * @returns {Object}
      */
     toJSON () {
-      return {
+      const json = {
         mathjs: name,
         object: this.object,
         index: this.index
       }
+      // only serialized when true, to keep the JSON of existing
+      // expressions unchanged
+      if (this.optionalChaining) {
+        json.optionalChaining = true
+      }
+      return json
     }
 
     /**
      * Instantiate an AccessorNode from its JSON representation
      * @param {Object} json
      *     An object structured like
-     *     `{"mathjs": "AccessorNode", object: ..., index: ...}`,
+     *     `{"mathjs": "AccessorNode", object: ..., index: ..., optionalChaining: ...}`,
      *     where mathjs is optional
      * @returns {AccessorNode}
      */
     static fromJSON (json) {
-      return new AccessorNode(json.object, json.index)
+      return new AccessorNode(json.object, json.index, json.optionalChaining)
     }
   }
 

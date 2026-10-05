@@ -1882,6 +1882,49 @@ describe('parse', function () {
       assert.throws(function () { parseAndEval('2 ? true') }, /False part of conditional expression expected/)
     })
 
+    it('should parse nullish coalescing ??', function () {
+      assert.strictEqual(parseAndEval('null ?? 42'), 42)
+      assert.strictEqual(parseAndEval('undefined ?? 42'), 42)
+      assert.strictEqual(parseAndEval('0 ?? 42'), 0)
+      assert.strictEqual(parseAndEval('false ?? 42'), false)
+      assert.strictEqual(parseAndEval('"" ?? 42'), '')
+      assert.strictEqual(parseAndEval('a ?? 2', { a: null }), 2)
+      assert.strictEqual(parseAndEval('a ?? 2', { a: undefined }), 2)
+      assert.strictEqual(parseAndEval('a ?? 2', { a: 3 }), 3)
+      assert.strictEqual(parseAndEval('a ?? b ?? c', { a: null, b: null, c: 7 }), 7)
+      assert.strictEqual(parseAndEval('a ?? b ?? c', { a: null, b: 5, c: 7 }), 5)
+      assert.strictEqual(parseAndEval('a ?? b ?? c', { a: 1, b: 5, c: 7 }), 1)
+    })
+
+    it('should lazily evaluate the right-hand side of nullish coalescing ??', function () {
+      const scope = { a: 1 }
+      math.parse('a ?? (b = 2)').compile().evaluate(scope)
+      assert.deepStrictEqual(scope, { a: 1 })
+
+      // the right-hand side must not be evaluated when the left-hand side is not nullish
+      assert.strictEqual(parseAndEval('1 ?? unknownFunction(2)'), 1)
+      assert.strictEqual(parseAndEval('null ?? 2 + 3'), 5)
+    })
+
+    it('should stringify nullish coalescing ??', function () {
+      assert.strictEqual(parse('a ?? b').toString(), 'a ?? b')
+      assert.strictEqual(parse('a ?? b ?? c').toString(), 'a ?? b ?? c')
+      assert.strictEqual(parse('a ?? (b ?? c)').toString(), 'a ?? (b ?? c)')
+      assert.strictEqual(parse('a ?? b + c').toString(), 'a ?? b + c')
+      assert.strictEqual(parse('(a + b) ?? c').toString(), '(a + b) ?? c')
+      assert.strictEqual(parse('a ?? b!').toString(), 'a ?? b!')
+      assert.strictEqual(parse('(a ?? b)!').toString(), '(a ?? b)!')
+    })
+
+    it('should evaluate nullish coalescing ?? via the nullish function', function () {
+      assert.strictEqual(math.nullish(null, 42), 42)
+      assert.strictEqual(math.nullish(undefined, 42), 42)
+      assert.strictEqual(math.nullish(0, 42), 0)
+      assert.strictEqual(math.nullish(false, 42), false)
+      assert.strictEqual(parseAndEval('nullish(a, 2)', { a: null }), 2)
+      assert.strictEqual(parseAndEval('nullish(a, 2)', { a: 3 }), 3)
+    })
+
     it('should parse : (range)', function () {
       assert.ok(parseAndEval('2:5') instanceof Matrix)
       assert.deepStrictEqual(parseAndEval('2:5'), math.matrix([2, 3, 4, 5]))
@@ -2139,6 +2182,142 @@ describe('parse', function () {
       })
 
       // TODO: extensively test operator precedence
+    })
+  })
+
+  describe('optional chaining', function () {
+    it('should parse optional chaining with dot notation', function () {
+      const node = parse('a?.b')
+      assert(node instanceof math.AccessorNode)
+      assert.strictEqual(node.optionalChaining, true)
+      assert.strictEqual(node.toString(), 'a?.b')
+
+      assert.strictEqual(parseAndEval('a?.b', { a: null }), undefined)
+      assert.strictEqual(parseAndEval('a?.b', { a: undefined }), undefined)
+      assert.strictEqual(parseAndEval('a?.b', { a: { b: 2 } }), 2)
+      assert.strictEqual(parseAndEval('obj?.foo.bar', { obj: { foo: { bar: 2 } } }), 2)
+    })
+
+    it('should parse optional chaining with bracket notation', function () {
+      const node = parse('a?.["b"]')
+      assert(node instanceof math.AccessorNode)
+      assert.strictEqual(node.optionalChaining, true)
+      assert.strictEqual(node.toString(), 'a?.["b"]')
+
+      assert.strictEqual(parseAndEval('row?.["unit price"]', { row: null }), undefined)
+      assert.strictEqual(parseAndEval('row?.["unit price"]', { row: { 'unit price': 9.5 } }), 9.5)
+    })
+
+    it('should parse optional chaining with a matrix index (one-based)', function () {
+      assert.strictEqual(parse('A?.[2]').toString(), 'A?.[2]')
+
+      assert.strictEqual(parseAndEval('A?.[2]', { A: null }), undefined)
+      assert.strictEqual(parseAndEval('A?.[2]', { A: [10, 20, 30] }), 20)
+      assert.deepStrictEqual(parseAndEval('A?.[2]', { A: math.matrix([10, 20, 30]) }), 20)
+      assert.strictEqual(parseAndEval('A?.[1,2]', { A: [[1, 2], [3, 4]] }), 2)
+    })
+
+    it('should parse optional chaining with function calls', function () {
+      assert.strictEqual(parse('formatter?.fmt(x)').toString(), 'formatter?.fmt(x)')
+      assert.strictEqual(parse('f?.(x)').toString(), 'f?.(x)')
+      assert.strictEqual(parse('a.b?.(x)').toString(), 'a.b?.(x)')
+
+      assert.strictEqual(parseAndEval('formatter?.fmt(x)', { formatter: null, x: 1 }), undefined)
+      assert.strictEqual(parseAndEval('formatter?.fmt(x)', { formatter: { fmt: function (v) { return v * 2 } }, x: 21 }), 42)
+      assert.strictEqual(parseAndEval('f?.(x)', { f: null, x: 1 }), undefined)
+      assert.strictEqual(parseAndEval('f?.(x)', { f: undefined, x: 1 }), undefined)
+      assert.strictEqual(parseAndEval('f?.(x)', { f: function (v) { return v + 1 }, x: 1 }), 2)
+      assert.strictEqual(parseAndEval('a.b?.(x)', { a: {}, x: 1 }), undefined)
+      assert.strictEqual(parseAndEval('a.b?.(x)', { a: { b: function (v) { return v * 3 } }, x: 2 }), 6)
+    })
+
+    it('should invoke an optionally chained method with the right context', function () {
+      const scope = {
+        obj: {
+          value: 4,
+          fn: function (x) { return x * this.value }
+        }
+      }
+      assert.strictEqual(parseAndEval('obj?.fn(2)', scope), 8)
+    })
+
+    it('should short-circuit a whole chain of accessors and calls', function () {
+      assert.strictEqual(parseAndEval('a?.b.c.d', { a: null }), undefined)
+      assert.strictEqual(parseAndEval('a?.b.c.d', { a: { b: { c: { d: 5 } } } }), 5)
+      assert.strictEqual(parseAndEval('a?.b?.c', { a: { b: null } }), undefined)
+      assert.strictEqual(parseAndEval('a?.b.c(1)', { a: null }), undefined)
+      assert.strictEqual(parseAndEval('a?.b.c(1)', { a: { b: { c: function (v) { return v + 1 } } } }), 2)
+      assert.strictEqual(parseAndEval('a?.b[2].c', { a: null }), undefined)
+      assert.strictEqual(parseAndEval('a?.b[2].c', { a: { b: [null, { c: 3 }] } }), 3)
+    })
+
+    it('should not evaluate the remainder of a short-circuited chain', function () {
+      const scope = {
+        a: null,
+        count: 0,
+        sideEffect: function () { scope.count++; return 1 }
+      }
+      assert.strictEqual(parseAndEval('a?.b.c(sideEffect())', scope), undefined)
+      assert.strictEqual(scope.count, 0)
+
+      assert.strictEqual(parseAndEval('a?.b[sideEffect()]', scope), undefined)
+      assert.strictEqual(scope.count, 0)
+
+      assert.strictEqual(parseAndEval('a?.(sideEffect())', scope), undefined)
+      assert.strictEqual(scope.count, 0)
+    })
+
+    it('should still throw an error when a non-optional link follows a nullish value', function () {
+      assert.throws(function () { parseAndEval('a?.b.c', { a: { b: null } }) }, TypeError)
+      assert.throws(function () { parseAndEval('(a?.b).c', { a: null }) }, TypeError)
+      assert.throws(function () { parseAndEval('a?.b()', { a: {} }) }, /No access to method "b"/)
+    })
+
+    it('should combine optional chaining with nullish coalescing for default values', function () {
+      assert.strictEqual(parseAndEval('coupon?.amount ?? 0', { coupon: null }), 0)
+      assert.strictEqual(parseAndEval('coupon?.amount ?? 0', { coupon: { amount: 30 } }), 30)
+      assert.strictEqual(parseAndEval('coupon?.amount ?? 0', { coupon: {} }), 0)
+    })
+
+    it('should stringify optional chaining', function () {
+      assert.strictEqual(parse('a?.b').toString(), 'a?.b')
+      assert.strictEqual(parse('a?.b.c').toString(), 'a?.b.c')
+      assert.strictEqual(parse('a?.b?.c').toString(), 'a?.b?.c')
+      assert.strictEqual(parse('a?.["b c"]').toString(), 'a?.["b c"]')
+      assert.strictEqual(parse('a?.[2]').toString(), 'a?.[2]')
+      assert.strictEqual(parse('a?.b(2)').toString(), 'a?.b(2)')
+      assert.strictEqual(parse('a?.(2)').toString(), 'a?.(2)')
+      assert.strictEqual(parse('a.b?.(2)').toString(), 'a.b?.(2)')
+      assert.strictEqual(parse('a?.b?.(2)').toString(), 'a?.b?.(2)')
+      assert.strictEqual(parse('(a?.b).c').toString(), '(a?.b).c')
+      assert.strictEqual(parse('coupon?.amount ?? 0').toString(), 'coupon?.amount ?? 0')
+    })
+
+    it('should not confuse optional chaining with a conditional operator', function () {
+      // `?.` directly followed by a digit is a conditional, not optional chaining
+      assert.strictEqual(parseAndEval('a?.3:.7', { a: true }), 0.3)
+      assert.strictEqual(parseAndEval('a?.3:.7', { a: false }), 0.7)
+      assert.strictEqual(parseAndEval('a ? .3 : .7', { a: true }), 0.3)
+    })
+
+    it('should throw an error when assigning to an optional chain', function () {
+      assert.throws(function () { parse('a?.b = 5') }, /SyntaxError: Cannot assign to optional chain/)
+      assert.throws(function () { parse('a?.b.c = 5') }, /SyntaxError: Cannot assign to optional chain/)
+      assert.throws(function () { parse('a?.[2] = 5') }, /SyntaxError: Cannot assign to optional chain/)
+    })
+
+    it('should throw an error in case of invalid optional chaining', function () {
+      assert.throws(function () { parse('a?.') }, /SyntaxError: Property name expected after optional chain/)
+      assert.throws(function () { parse('a?..b') }, /SyntaxError: Property name expected after optional chain/)
+      assert.throws(function () { parse('a?.+1') }, /SyntaxError: Property name expected after optional chain/)
+    })
+
+    it('should keep evaluating existing conditional, accessor, and index expressions unchanged', function () {
+      assert.strictEqual(parseAndEval('a ? b : c', { a: true, b: 1, c: 2 }), 1)
+      assert.strictEqual(parseAndEval('obj.foo', { obj: { foo: 2 } }), 2)
+      assert.strictEqual(parseAndEval('obj["foo"]', { obj: { foo: 2 } }), 2)
+      assert.strictEqual(parseAndEval('A[2]', { A: [10, 20, 30] }), 20)
+      assert.strictEqual(parseAndEval('coupon == null ? 0 : coupon.amount', { coupon: null }), 0)
     })
   })
 

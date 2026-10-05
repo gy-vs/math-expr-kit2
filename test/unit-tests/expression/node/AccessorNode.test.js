@@ -557,4 +557,117 @@ describe('AccessorNode', function () {
     const parsed = AccessorNode.fromJSON(json)
     assert.deepStrictEqual(parsed, node)
   })
+
+  it('should create an AccessorNode with optional chaining', function () {
+    const n1 = new AccessorNode(new SymbolNode('a'), new IndexNode([new ConstantNode('b')]))
+    assert.strictEqual(n1.optionalChaining, false)
+
+    const n2 = new AccessorNode(new SymbolNode('a'), new IndexNode([new ConstantNode('b')]), true)
+    assert.strictEqual(n2.optionalChaining, true)
+    assert(n2 instanceof AccessorNode)
+    assert(n2 instanceof Node)
+  })
+
+  it('should compile an AccessorNode with optional chaining', function () {
+    const a = new SymbolNode('a')
+    const index = new IndexNode([new ConstantNode('b')], true)
+    const n = new AccessorNode(a, index, true)
+    const expr = n.compile()
+
+    assert.strictEqual(expr.evaluate({ a: null }), undefined)
+    assert.strictEqual(expr.evaluate({ a: undefined }), undefined)
+    assert.strictEqual(expr.evaluate({ a: { b: 2 } }), 2)
+  })
+
+  it('should compile an AccessorNode with optional chaining and an index', function () {
+    const a = new SymbolNode('a')
+    const index = new IndexNode([new ConstantNode(2)])
+    const n = new AccessorNode(a, index, true)
+    const expr = n.compile()
+
+    assert.strictEqual(expr.evaluate({ a: null }), undefined)
+    assert.strictEqual(expr.evaluate({ a: [10, 20, 30] }), 20)
+  })
+
+  it('should short-circuit a chain of accessors when a link has optional chaining', function () {
+    // a?.b.c
+    const inner = new AccessorNode(new SymbolNode('a'), new IndexNode([new ConstantNode('b')], true), true)
+    const outer = new AccessorNode(inner, new IndexNode([new ConstantNode('c')], true))
+    const expr = outer.compile()
+
+    assert.strictEqual(expr.evaluate({ a: null }), undefined)
+    assert.strictEqual(expr.evaluate({ a: { b: { c: 3 } } }), 3)
+    assert.throws(function () { expr.evaluate({ a: { b: null } }) }, TypeError)
+  })
+
+  it('should stringify an AccessorNode with optional chaining', function () {
+    const a = new SymbolNode('a')
+
+    const dotNotation = new AccessorNode(a, new IndexNode([new ConstantNode('b')], true), true)
+    assert.strictEqual(dotNotation.toString(), 'a?.b')
+
+    const bracketNotation = new AccessorNode(a, new IndexNode([new ConstantNode('b')]), true)
+    assert.strictEqual(bracketNotation.toString(), 'a?.["b"]')
+
+    const index = new AccessorNode(a, new IndexNode([new ConstantNode(2)]), true)
+    assert.strictEqual(index.toString(), 'a?.[2]')
+  })
+
+  it('should LaTeX an AccessorNode with optional chaining', function () {
+    const a = new SymbolNode('a')
+    const n = new AccessorNode(a, new IndexNode([new ConstantNode('b')], true), true)
+    assert.strictEqual(n.toTex(), ' a?.b')
+  })
+
+  it('should HTML an AccessorNode with optional chaining', function () {
+    const a = new SymbolNode('a')
+    const n = new AccessorNode(a, new IndexNode([new ConstantNode('b')], true), true)
+    assert.strictEqual(n.toHTML(),
+      '<span class="math-symbol">a</span>' +
+      '<span class="math-operator math-accessor-operator">?</span>' +
+      '<span class="math-operator math-accessor-operator">.</span>' +
+      '<span class="math-symbol math-property">b</span>')
+  })
+
+  it('should keep optional chaining when mapping or cloning an AccessorNode', function () {
+    const a = new SymbolNode('a')
+    const index = new IndexNode([new ConstantNode('b')], true)
+    const n = new AccessorNode(a, index, true)
+
+    const mapped = n.map(node => node)
+    assert.strictEqual(mapped.optionalChaining, true)
+    assert.strictEqual(mapped.toString(), 'a?.b')
+
+    const cloned = n.clone()
+    assert.strictEqual(cloned.optionalChaining, true)
+    assert.strictEqual(cloned.toString(), 'a?.b')
+  })
+
+  it('toJSON and fromJSON with optional chaining', function () {
+    const a = new SymbolNode('a')
+    const node = new AccessorNode(a, new IndexNode([new ConstantNode('b')], true), true)
+
+    const json = node.toJSON()
+
+    assert.deepStrictEqual(json, {
+      mathjs: 'AccessorNode',
+      index: node.index,
+      object: a,
+      optionalChaining: true
+    })
+
+    const parsed = AccessorNode.fromJSON(json)
+    assert.deepStrictEqual(parsed, node)
+    assert.strictEqual(parsed.optionalChaining, true)
+    assert.strictEqual(parsed.toString(), 'a?.b')
+  })
+
+  it('should survive a JSON round-trip via the reviver and evaluate the same', function () {
+    const node = math.parse('a?.b.c ?? 0')
+    const revived = JSON.parse(JSON.stringify(node), math.reviver)
+
+    assert.strictEqual(revived.toString(), node.toString())
+    assert.strictEqual(revived.evaluate({ a: null }), 0)
+    assert.strictEqual(revived.evaluate({ a: { b: { c: 5 } } }), 5)
+  })
 })
